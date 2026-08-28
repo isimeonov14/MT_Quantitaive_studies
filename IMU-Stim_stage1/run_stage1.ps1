@@ -39,7 +39,7 @@ $RequiredFiles = @(
     $RenodeExe,
     $Resc,
     $Parser,
-    (Join-Path $Root "raw_data.csv"),
+    (Join-Path $Root "data/no_stim_stim.csv"),
     (Join-Path $RenodeDir "zephyr.elf"),
     (Join-Path $RenodeDir "tracker_spi_imu.repl"),
     (Join-Path $RenodeDir "LSM6DSV16BX_SmartVNS_Replay.cs")

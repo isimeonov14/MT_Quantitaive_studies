@@ -3,23 +3,18 @@
 
 #include <stddef.h>
 
+#include "sensors/sensors.h"
+
 #define QUAT_REPLAY_RATE_HZ 60U
 
 /*
- * SmartVNS quaternion representation.
+ * Stage-1 output represented with the exact SmartVNS production type.
  *
- * Component order:
- *     [x, y, z, w]
+ * quat_data_t:
+ *     timestamp : uint32_t
+ *     x, y, z, w: int16_t Q15 quaternion components
  */
-struct quat_replay_sample
-{
-    float x;
-    float y;
-    float z;
-    float w;
-};
-
-extern const struct quat_replay_sample quat_replay_data[];
+extern const quat_data_t quat_replay_data[];
 extern const size_t quat_replay_data_count;
 
 #endif /* QUAT_REPLAY_DATA_H_ */

@@ -1,6 +1,5 @@
 from pathlib import Path
 import csv
-import math
 
 
 # =============================================================================
@@ -9,8 +8,6 @@ import math
 
 SOURCE_RATE_HZ = 120
 REPLAY_RATE_HZ = 60
-
-QUAT_NORM_WARN_TOLERANCE = 0.01
 
 
 # =============================================================================
@@ -29,10 +26,10 @@ QUAT_NORM_WARN_TOLERANCE = 0.01
 SCRIPT_DIR = Path(__file__).resolve().parent
 ROOT_DIR = SCRIPT_DIR.parent
 
-RAW_DATA = ROOT_DIR / "raw_data.csv"
+# RAW_DATA = ROOT_DIR / "data" / "raw_data.csv"
+RAW_DATA = ROOT_DIR / "data" / "no_stim_stim.csv"
 
-LOG_DIR = ROOT_DIR / "logs"
-INPUT_LOG = LOG_DIR / "renode_uart.log"
+INPUT_LOG = ROOT_DIR / "logs" / "renode_uart.log"
 
 GENERATED_DIR = ROOT_DIR / "generated_source"
 OUTPUT_H = GENERATED_DIR / "quat_replay_data.h"
@@ -44,7 +41,7 @@ OUTPUT_C = GENERATED_DIR / "quat_replay_data.c"
 # =============================================================================
 
 def count_csv_samples(path: Path) -> int:
-    """Count data rows in the original source CSV."""
+    """Count data rows in the original 120-Hz source CSV."""
     with path.open("r", encoding="utf-8", newline="") as f:
         reader = csv.reader(f)
 
@@ -58,23 +55,20 @@ def count_csv_samples(path: Path) -> int:
 
 def parse_uart_quaternions(path: Path):
     """
-    Parse records of the form:
+    Parse Stage-1 records:
 
-        QUAT,index,timestamp,x,y,z,w
+        QUAT,index,timestamp,qx,qy,qz,qw
 
-    Other UART output is ignored.
+    qx..qw are signed int16 Q15 values from the production quat_data_t.
+    All unrelated Zephyr/Renode UART output is ignored.
     """
     samples = []
 
     with path.open("r", encoding="utf-8", errors="ignore") as f:
         for line_number, raw_line in enumerate(f, start=1):
-
-            # Remove common UART artefacts.
             line = raw_line.replace("\x00", "").strip()
 
-            # Allow ordinary Zephyr/logging output in the same UART file.
             marker = line.find("QUAT,")
-
             if marker < 0:
                 continue
 
@@ -90,12 +84,10 @@ def parse_uart_quaternions(path: Path):
             try:
                 index = int(fields[1])
                 timestamp = int(fields[2])
-
-                x = float(fields[3])
-                y = float(fields[4])
-                z = float(fields[5])
-                w = float(fields[6])
-
+                qx = int(fields[3])
+                qy = int(fields[4])
+                qz = int(fields[5])
+                qw = int(fields[6])
             except ValueError as exc:
                 raise RuntimeError(
                     f"Invalid QUAT value at UART line {line_number}:\n"
@@ -106,10 +98,10 @@ def parse_uart_quaternions(path: Path):
                 {
                     "index": index,
                     "timestamp": timestamp,
-                    "x": x,
-                    "y": y,
-                    "z": z,
-                    "w": w,
+                    "qx": qx,
+                    "qy": qy,
+                    "qz": qz,
+                    "qw": qw,
                 }
             )
 
@@ -117,19 +109,13 @@ def parse_uart_quaternions(path: Path):
 
 
 def validate_samples(samples, expected_count: int):
-    """Validate sequence continuity and quaternion values."""
-
+    """Validate sequence continuity, sample count, timestamps and Q15 bounds."""
     if not samples:
         raise RuntimeError(
             f"No QUAT records found in:\n{INPUT_LOG}"
         )
 
-    # -------------------------------------------------------------------------
-    # Sequence continuity
-    # -------------------------------------------------------------------------
-
     for expected_index, sample in enumerate(samples):
-
         if sample["index"] != expected_index:
             raise RuntimeError(
                 "Quaternion sequence discontinuity:\n"
@@ -137,105 +123,80 @@ def validate_samples(samples, expected_count: int):
                 f"  received index: {sample['index']}"
             )
 
-    # -------------------------------------------------------------------------
-    # Expected sample count
-    #
-    # The source is 120 Hz and firmware output is 60 Hz:
-    #
-    #     2 source samples -> 1 application-facing sample
-    # -------------------------------------------------------------------------
-
-    if len(samples) != expected_count:
-        raise RuntimeError(
-            "Unexpected quaternion sample count:\n"
-            f"  expected: {expected_count}\n"
-            f"  received: {len(samples)}"
-        )
-
-    # -------------------------------------------------------------------------
-    # Quaternion values
-    # -------------------------------------------------------------------------
-
-    norms = []
-    warning_count = 0
-
-    for sample in samples:
-
-        q = (
-            sample["x"],
-            sample["y"],
-            sample["z"],
-            sample["w"],
-        )
-
-        if not all(math.isfinite(v) for v in q):
+        if not (0 <= sample["timestamp"] <= 0xFFFFFFFF):
             raise RuntimeError(
-                f"Non-finite quaternion at index {sample['index']}"
+                f"Timestamp outside uint32_t range at sample {sample['index']}: "
+                f"{sample['timestamp']}"
             )
 
-        norm = math.sqrt(sum(v * v for v in q))
-        norms.append(norm)
-
-        if abs(norm - 1.0) > QUAT_NORM_WARN_TOLERANCE:
-            warning_count += 1
-
-    return norms, warning_count
+        for name in ("qx", "qy", "qz", "qw"):
+            value = sample[name]
+            if value < -32768 or value > 32767:
+                raise RuntimeError(
+                    f"{name} outside int16_t/Q15 range at sample "
+                    f"{sample['index']}: {value}"
+                )
+    
+    if len(samples) != expected_count:
+        missing = expected_count - len(samples)
+        difference_pct = abs(missing) / expected_count * 100.0
+    
+        print(
+            "WARNING: Quaternion sample count differs from expected:"
+        )
+        print(f"  expected: {expected_count}")
+        print(f"  received: {len(samples)}")
+        print(f"  difference: {missing} samples ({difference_pct:.4f}%)")
+        print()
 
 
 def generate_header():
-    """Generate quat_replay_data.h."""
-
+    """
+    Generate a header that exposes the replay trace directly as the production
+    SmartVNS quat_data_t type.
+    """
     text = f"""\
 #ifndef QUAT_REPLAY_DATA_H_
 #define QUAT_REPLAY_DATA_H_
 
 #include <stddef.h>
 
+#include "sensors/sensors.h"
+
 #define QUAT_REPLAY_RATE_HZ {REPLAY_RATE_HZ}U
 
 /*
- * SmartVNS quaternion representation.
+ * Stage-1 output represented with the exact SmartVNS production type.
  *
- * Component order:
- *     [x, y, z, w]
+ * quat_data_t:
+ *     timestamp : uint32_t
+ *     x, y, z, w: int16_t Q15 quaternion components
  */
-struct quat_replay_sample
-{{
-    float x;
-    float y;
-    float z;
-    float w;
-}};
-
-extern const struct quat_replay_sample quat_replay_data[];
+extern const quat_data_t quat_replay_data[];
 extern const size_t quat_replay_data_count;
 
 #endif /* QUAT_REPLAY_DATA_H_ */
 """
-
     OUTPUT_H.write_text(text, encoding="utf-8")
 
 
 def generate_source(samples):
-    """Generate quat_replay_data.c."""
-
+    """Generate the production-format quaternion replay array."""
     lines = [
         '#include "quat_replay_data.h"',
         "",
-        "const struct quat_replay_sample quat_replay_data[] =",
+        "const quat_data_t quat_replay_data[] =",
         "{",
     ]
 
     for sample in samples:
-
-        # 9 significant decimal digits are sufficient to round-trip
-        # IEEE-754 binary32 values.
         lines.append(
             "    { "
-            f".x = {sample['x']:.9g}f, "
-            f".y = {sample['y']:.9g}f, "
-            f".z = {sample['z']:.9g}f, "
-            f".w = {sample['w']:.9g}f "
+            f".timestamp = {sample['timestamp']}U, "
+            f".x = {sample['qx']}, "
+            f".y = {sample['qy']}, "
+            f".z = {sample['qz']}, "
+            f".w = {sample['qw']} "
             "},"
         )
 
@@ -247,10 +208,7 @@ def generate_source(samples):
         "",
     ]
 
-    OUTPUT_C.write_text(
-        "\n".join(lines),
-        encoding="utf-8",
-    )
+    OUTPUT_C.write_text("\n".join(lines), encoding="utf-8")
 
 
 # =============================================================================
@@ -258,13 +216,8 @@ def generate_source(samples):
 # =============================================================================
 
 def main():
-
     print("=== SmartVNS Stage 1 UART Parser ===")
     print()
-
-    # -------------------------------------------------------------------------
-    # Check inputs
-    # -------------------------------------------------------------------------
 
     if not RAW_DATA.exists():
         raise FileNotFoundError(
@@ -276,14 +229,7 @@ def main():
             f"Renode UART log not found:\n{INPUT_LOG}"
         )
 
-    GENERATED_DIR.mkdir(
-        parents=True,
-        exist_ok=True,
-    )
-
-    # -------------------------------------------------------------------------
-    # Determine expected output size
-    # -------------------------------------------------------------------------
+    GENERATED_DIR.mkdir(parents=True, exist_ok=True)
 
     source_samples = count_csv_samples(RAW_DATA)
 
@@ -295,48 +241,16 @@ def main():
         // SOURCE_RATE_HZ
     )
 
-    print(f"Source CSV:       {RAW_DATA}")
-    print(f"UART log:         {INPUT_LOG}")
-    print()
     print(f"Source samples:   {source_samples}")
     print(f"Source rate:      {SOURCE_RATE_HZ} Hz")
     print(f"Quaternion rate:  {REPLAY_RATE_HZ} Hz")
     print(f"Expected output:  {expected_samples}")
     print()
 
-    # -------------------------------------------------------------------------
-    # Parse UART
-    # -------------------------------------------------------------------------
-
     samples = parse_uart_quaternions(INPUT_LOG)
-
-    # -------------------------------------------------------------------------
-    # Validate
-    # -------------------------------------------------------------------------
-
-    norms, warning_count = validate_samples(
-        samples,
-        expected_samples,
-    )
+    validate_samples(samples, expected_samples)
 
     print(f"Parsed samples:   {len(samples)}")
-    print()
-    print("Quaternion norm:")
-    print(f"  minimum:        {min(norms):.8f}")
-    print(f"  mean:           {sum(norms) / len(norms):.8f}")
-    print(f"  maximum:        {max(norms):.8f}")
-
-    if warning_count:
-        print()
-        print(
-            f"WARNING: {warning_count} quaternion samples differ "
-            f"from unit norm by more than "
-            f"{QUAT_NORM_WARN_TOLERANCE:.3f}."
-        )
-
-    # -------------------------------------------------------------------------
-    # Generate BabbleSim source
-    # -------------------------------------------------------------------------
 
     generate_header()
     generate_source(samples)
@@ -347,7 +261,7 @@ def main():
     print(f"  {OUTPUT_C}")
     print()
     print(
-        f"{len(samples)} quaternion samples at "
+        f"{len(samples)} production-format quat_data_t samples at "
         f"{REPLAY_RATE_HZ} Hz ready for BabbleSim."
     )
 

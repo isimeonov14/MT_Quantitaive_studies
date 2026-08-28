@@ -6,23 +6,22 @@ mach create $name
 
 machine LoadPlatformDescription $ORIGIN/tracker_spi_imu.repl
 
+sysbus LoadELF $ORIGIN/zephyr.elf
+
+emulation SetGlobalAdvanceImmediately true
+
 # Recorded source data is 120 Hz.
 # The firmware itself is configured to produce 60 Hz IMU/quaternion output.
-spi3.imu LoadRawImuCsv $ORIGIN/../raw_data.csv 120 false
+spi3.imu LoadRawImuCsv $ORIGIN/../data/no_stim_stim.csv 120 false
 
 # Capture emulated UART directly to the Stage-1 logs directory.
-uart0 CreateFileBackend $ORIGIN/../logs/renode_uart.log true
-
-macro reset
-"""
-    sysbus LoadELF $ORIGIN/zephyr.elf
-"""
-
-runMacro $reset
+uart0 CreateFileBackend $ORIGIN/../logs/renode_uart.log false
 
 # Enough virtual time to consume the entire recorded trace.
-emulation RunFor "15"
+emulation RunFor "1250"
 
 uart0 CloseFileBackend $ORIGIN/../logs/renode_uart.log
 
 quit
+
+emulation GetTimeSourceInfo
