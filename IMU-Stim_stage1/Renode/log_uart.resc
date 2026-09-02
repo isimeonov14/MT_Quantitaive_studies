@@ -18,7 +18,7 @@ spi3.imu LoadRawImuCsv $ORIGIN/../data/no_stim_stim.csv 120 false
 uart0 CreateFileBackend $ORIGIN/../logs/renode_uart.log false
 
 # Enough virtual time to consume the entire recorded trace.
-emulation RunFor "1250"
+emulation RunFor "10"
 
 uart0 CloseFileBackend $ORIGIN/../logs/renode_uart.log
 
